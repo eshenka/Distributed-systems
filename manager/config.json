@@ -1,0 +1,5 @@
+{
+  "workers": 3,
+  "worker_port": 9000,
+  "alphabet": "abcdefghijklmnopqrstuvwxyz0123456789"
+}

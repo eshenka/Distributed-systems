@@ -1,0 +1,23 @@
+services:
+  manager:
+    build: ./manager
+    ports:
+      - "8080:8000"
+    networks:
+      - backend
+    environment:
+      - WORKERS=3
+      - WORKER_PORT=9000
+    depends_on:
+      - worker
+
+  worker:
+    build: ./worker
+    networks:
+      - backend
+    deploy:
+      replicas: 3
+
+networks:
+  backend:
+    driver: bridge
