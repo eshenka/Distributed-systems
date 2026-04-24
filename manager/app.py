@@ -17,16 +17,16 @@ app = Flask(__name__)
 
 WORKERS_COUNT = int(os.getenv('WORKERS', '3'))
 WORKER_PORT = os.getenv('WORKER_PORT', '9000')
+TIMEOUT_WORKER_TIME = int(os.getenv('TIMEOUT_WORKER_TIME', '2'))
+WAITING_TIME = int(os.getenv('WAITING_TIME', '1'))
 ALPHABET = json.load(open('config.json'))['alphabet']
 
 WORKERS = [
-    f"http://docker_course-worker-{i}:{WORKER_PORT}/internal/api/worker/hash/crack/task"
+    f"http://docker_course-worker-{i}:{WORKER_PORT}"
     for i in range(1, WORKERS_COUNT + 1)
 ]
 
-WAITING_TIME = 2
 RETRIES_MAX_NUMBER = 2
-TIMEOUT_WORKER_TIME = 2
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -120,7 +120,7 @@ def index():
 @dataclass
 class WorkerTask:
     worker_url: str
-    worker_id: str
+    local_task_id: str
     idx_start: int
     idx_end: int
     word: str
@@ -176,13 +176,10 @@ class TaskManager:
                                 time_since_error > TIMEOUT_WORKER_TIME and
                                 worker.retry_count < RETRIES_MAX_NUMBER
                             ):
-                                logger.warning(f"Retrying failed worker {worker.worker_id}")
+                                logger.warning(f"Retrying failed worker {worker.local_task_id}")
 
                                 await self._redistribute_worker_task(worker, task_id)
                                 worker.retry_count = RETRIES_MAX_NUMBER
-                    
-                    for w in workers:
-                        logger.info(f"worker {w.worker_id} status {w.status}")
 
                     if all(w.status in ["COMPLETED", "ERROR"] for w in workers):
                         await self._finalize_task(task_id)
@@ -212,11 +209,11 @@ class TaskManager:
             return
         
         logger.info(f"Redistributing range [{remaining_range[0]}, {remaining_range[1]}) "
-                   f"from {failed_worker.worker_id}")
+                   f"from {failed_worker.local_task_id}")
         
         new_worker_task = WorkerTask(
             worker_url=target_worker,
-            worker_id=f"{failed_worker.worker_id}_redistributed",
+            local_task_id=f"{failed_worker.local_task_id}_redistributed",
             idx_start=remaining_range[0],
             idx_end=remaining_range[1],
             word=failed_worker.word,
@@ -236,13 +233,13 @@ class TaskManager:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    worker_task.worker_url,
+                    worker_task.worker_url+"/internal/api/worker/hash/crack/task",
                     json={
                         "word": worker_task.word,
                         "idx_start": worker_task.idx_start,
                         "idx_end": worker_task.idx_end,
                         "task_id": worker_task.task_id,
-                        "worker_id": worker_task.worker_id,
+                        "local_task_id": worker_task.local_task_id,
                         "last_processed_index": worker_task.last_processed_index,
                         "found_words": worker_task.found_words
                     },
@@ -258,7 +255,7 @@ class TaskManager:
                         
                         with status_lock:
                             if worker_task.task_id in task_statuses:
-                                task_statuses[worker_task.task_id][worker_task.worker_id] = {
+                                task_statuses[worker_task.task_id][worker_task.local_task_id] = {
                                     "status": "COMPLETED",
                                     "timestamp": time.time(),
                                     "found_words": worker_task.found_words,
@@ -281,9 +278,9 @@ class TaskManager:
     async def _finalize_task(self, task_id: str):
         workers = self.active_tasks.get(task_id, [])
         
-        logger.info(f"Finalizing task {task_id}. Worker statuses:")
+        logger.info(f"Finalizing request {task_id}. Local task statuses:")
         for w in workers:
-            logger.info(f"  Worker {w.worker_id}: status={w.status}, "
+            logger.info(f"  Local task {w.local_task_id}: status={w.status}, "
                     f"found={len(w.found_words)} words, error={w.error}")
         
         all_found_words = set()
@@ -309,8 +306,6 @@ class TaskManager:
         
         total_covered = sum(end - start for start, end in merged)
         total_range = max(w.idx_end for w in workers) if workers else 0
-
-        logger.info(f"total covered: {total_covered} total_range: {total_range}")
 
         is_fully_covered = total_covered >= total_range
 
@@ -351,7 +346,7 @@ class TaskManager:
             
             worker_task = WorkerTask(
                 worker_url=worker_url,
-                worker_id=f"worker_{i}",
+                local_task_id=f"{task_id}_{i + 1}",
                 idx_start=idx_start,
                 idx_end=idx_end,
                 word=word,
@@ -361,7 +356,7 @@ class TaskManager:
             workers.append(worker_task)
             
             with status_lock:
-                task_statuses[task_id][f"worker_{i}"] = {
+                task_statuses[task_id][f"{task_id}_{i}"] = {
                     "status": "PENDING",
                     "range": f"[{idx_start}, {idx_end})",
                     "progress": 0
@@ -377,11 +372,11 @@ class TaskManager:
         
         return task_id
     
-    def update_worker_status(self, task_id: str, worker_id: str, 
+    def update_worker_status(self, task_id: str, local_task_id: str, 
                         last_index: int, found_words: List[str]):
         if task_id in self.active_tasks:
             for worker in self.active_tasks[task_id]:
-                if worker.worker_id == worker_id:
+                if worker.local_task_id == local_task_id:
                     worker.last_processed_index = last_index
                     if found_words:
                         existing = set(worker.found_words)
@@ -389,20 +384,20 @@ class TaskManager:
                         worker.found_words = list(existing)
                     worker.last_update_time = time.time()
                     break
-        
+
         with status_lock:
-            if task_id in task_statuses and worker_id in task_statuses[task_id]:
+            if task_id in task_statuses and local_task_id in task_statuses[task_id]:
                 progress = 0
                 if task_id in self.active_tasks:
                     for w in self.active_tasks[task_id]:
-                        if w.worker_id == worker_id and w.idx_end > w.idx_start:
+                        if w.local_task_id == local_task_id and w.idx_end > w.idx_start:
                             progress = ((last_index - w.idx_start) / 
                                     (w.idx_end - w.idx_start) * 100)
                 
-                current_words = task_statuses[task_id][worker_id].get("found_words", [])
+                current_words = task_statuses[task_id][local_task_id].get("found_words", [])
                 all_words = list(set(current_words + found_words))
                 
-                task_statuses[task_id][worker_id].update({
+                task_statuses[task_id][local_task_id].update({
                     "status": "IN_PROGRESS",
                     "timestamp": time.time(),
                     "last_index": last_index,
@@ -432,18 +427,18 @@ def task():
 def receive_status():
     data = request.get_json()
     task_id = data.get("task_id")
-    worker_id = data.get("worker_id")
+    local_task_id = data.get("local_task_id")
     last_index = data.get("last_index")
     found_words = data.get("found_words", [])
     
     if found_words:
-        logger.info(f"Status update - Task: {task_id}, Worker: {worker_id}, "
+        logger.info(f"Status update - Task: {task_id}, Local task: {local_task_id}, "
                    f"Last index: {last_index}, Found words: {found_words}")
     else:
-        logger.info(f"Status update - Task: {task_id}, Worker: {worker_id}, "
+        logger.info(f"Status update - Task: {task_id}, Local task: {local_task_id}, "
                 f"Last index: {last_index}, No words yet found")
     
-    task_manager.update_worker_status(task_id, worker_id, last_index, found_words)
+    task_manager.update_worker_status(task_id, local_task_id, last_index, found_words)
     
     return jsonify({"status": "received"})
 
@@ -464,8 +459,8 @@ def get_task_status():
         worker_count = 0
         all_found_words = set()
         
-        for worker_id, worker_data in task_data.items():
-            if worker_id.startswith("_"):
+        for local_task_id, worker_data in task_data.items():
+            if local_task_id.startswith("_"):
                 continue
             if "progress" in worker_data:
                 total_progress += worker_data["progress"]
@@ -495,46 +490,6 @@ def get_task_status():
             "progress": round(avg_progress, 2),
             "data": list(all_found_words)
         })
-
-@app.route("/task/<task_id>/status", methods=["GET"])
-def get_task_status_old(task_id):
-    with status_lock:
-        if task_id in task_statuses:
-            return jsonify({
-                "task_id": task_id,
-                "statuses": task_statuses[task_id]
-            })
-        else:
-            return jsonify({"error": "Task not found"}), 404
-
-@app.route("/task/<task_id>/progress", methods=["GET"])
-def get_task_progress(task_id):
-    with status_lock:
-        if task_id in task_statuses:
-            task_data = task_statuses[task_id]
-            
-            total_progress = 0
-            all_found_words = set()
-            
-            for worker_id, worker_data in task_data.items():
-                if worker_id.startswith("_"):
-                    continue
-                if "progress" in worker_data:
-                    total_progress += worker_data["progress"]
-                if "found_words" in worker_data:
-                    all_found_words.update(worker_data["found_words"])
-            
-            avg_progress = total_progress / len([k for k in task_data.keys() if not k.startswith("_")]) if task_data else 0
-            
-            return jsonify({
-                "task_id": task_id,
-                "overall_progress": round(avg_progress, 2),
-                "total_words_found": len(all_found_words),
-                "found_words": list(all_found_words),
-                "workers_status": {k: v for k, v in task_data.items() if not k.startswith("_")}
-            })
-        else:
-            return jsonify({"error": "Task not found"}), 404
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True, threaded=True)

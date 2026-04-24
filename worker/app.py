@@ -15,15 +15,16 @@ app = Flask(__name__)
 WORKER_ID = socket.gethostname()
 MANAGER_URL = os.getenv('MANAGER_URL', 'http://manager:8000')
 ALPHABET = json.load(open('config.json'))['alphabet']
+WAITING_TIME = int(os.getenv('WAITING_TIME', '1'))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def send_status(manager_url, task_id, worker_id, status, progress=None):
+def send_status(manager_url, task_id, local_task_id, status, progress=None):
     try:
         status_data = {
             "task_id": task_id,
-            "worker_id": worker_id,
+            "local_task_id": local_task_id,
             "status": status,
             "timestamp": time.time()
         }
@@ -44,7 +45,7 @@ def send_status(manager_url, task_id, worker_id, status, progress=None):
         )
         
         if response.status_code == 200:
-            logger.debug(f"Status sent successfully for worker {worker_id}")
+            logger.debug(f"Status sent successfully for worker {local_task_id}")
             return True
         else:
             logger.warning(f"Failed to send status: {response.status_code}")
@@ -65,7 +66,7 @@ def process():
     data = request.get_json()
     logger.info(f"Worker {WORKER_ID} received process request: {data}")
 
-    required_fields = ["word", "idx_start", "idx_end", "task_id", "worker_id"]
+    required_fields = ["word", "idx_start", "idx_end", "task_id", "local_task_id"]
     for field in required_fields:
         if field not in data:
             logger.error(f"Missing required field: {field}")
@@ -75,7 +76,7 @@ def process():
     idx_start = int(data["idx_start"])
     idx_end = int(data["idx_end"])
     task_id = data["task_id"]
-    worker_id = data["worker_id"]
+    local_task_id = data["local_task_id"]
     
     last_processed_index = data.get("last_processed_index", idx_start)
     previously_found_words = data.get("found_words", [])
@@ -90,9 +91,9 @@ def process():
     total_iterations = idx_end - start_from
     
     last_status_time = time.time()
-    status_interval = 1
+    status_interval = WAITING_TIME
 
-    logger.info(f"Worker {WORKER_ID} ({worker_id}) processing range [{start_from}, {idx_end}) for task {task_id}")
+    logger.info(f"Worker {WORKER_ID} ({local_task_id}) processing range [{start_from}, {idx_end}) for task {task_id}")
     logger.info(f"Resuming from index {start_from}, already found {len(ret_words)} words")
 
     current_index = start_from
@@ -108,7 +109,7 @@ def process():
                 status_sent = send_status(
                     manager_url, 
                     task_id, 
-                    worker_id, 
+                    local_task_id, 
                     "IN_PROGRESS",
                     {
                         "percentage": round(progress, 2), 
@@ -134,7 +135,7 @@ def process():
                 send_status(
                     manager_url, 
                     task_id, 
-                    worker_id, 
+                    local_task_id, 
                     "FOUND", 
                     {
                         "word": gen_word, 
@@ -147,7 +148,7 @@ def process():
         final_status_sent = send_status(
             manager_url, 
             task_id, 
-            worker_id, 
+            local_task_id, 
             "COMPLETED", 
             {
                 "words_count": len(ret_words), # count 
@@ -163,7 +164,7 @@ def process():
         return jsonify({
             "status": "ok",
             "worker": WORKER_ID,
-            "worker_id": worker_id,
+            "local_task_id": local_task_id,
             "task_id": task_id,
             "received_word": ret_words,
             "range_processed": f"[{idx_start}, {idx_end})",
@@ -177,7 +178,7 @@ def process():
         send_status(
             manager_url, 
             task_id, 
-            worker_id, 
+            local_task_id, 
             "ERROR", 
             {
                 "error": str(e),
@@ -198,7 +199,7 @@ def process():
 @app.route("/status", methods=["GET"])
 def worker_status():
     return jsonify({
-        "worker_id": WORKER_ID,
+        "local_task_id": WORKER_ID,
         "status": "alive",
         "alphabet": ALPHABET,
         "alphabet_length": len(ALPHABET),

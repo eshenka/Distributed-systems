@@ -1,0 +1,523 @@
+openapi: 3.0.0
+info:
+  title: Hash Cracker API
+  description: |
+    Распределённая система для взлома MD5 хешей методом перебора.
+    
+    ## Архитектура
+    - **Менеджер** (порт 8000) - координирует работу воркеров
+    - **Воркеры** (порт 9000) - выполняют непосредственный перебор
+    
+    ## Особенности
+    - Автоматическое распределение задач между воркерами
+    - Отслеживание прогресса выполнения
+    - Механизм восстановления при сбоях воркеров
+    - Дедлайн 20 секунд на ответ от воркера
+    - Максимум 3 попытки перезапуска упавшего воркера
+  version: 1.0.0
+  contact:
+    name: Hash Cracker Team
+    email: support@hashcracker.local
+
+servers:
+  - url: http://manager:8000
+    description: Менеджер (внутренняя сеть Docker)
+  - url: http://localhost:8000
+    description: Менеджер (локальный доступ)
+
+tags:
+  - name: External API
+    description: Публичное API для клиентов
+  - name: Internal API
+    description: Внутреннее API для коммуникации менеджера и воркеров
+    x-internal: true
+
+paths:
+  # ========== ВНЕШНЕЕ API (доступно клиентам) ==========
+  /api/hash/crack:
+    post:
+      tags:
+        - External API
+      summary: Запустить взлом хеша
+      description: |
+        Создаёт новую задачу на взлом MD5 хеша.
+        Задача распределяется между всеми доступными воркерами.
+      operationId: crackHash
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - word
+                - length
+              properties:
+                word:
+                  type: string
+                  description: MD5 хеш для взлома
+                  example: "5f4dcc3b5aa765d61d8327deb882cf99"
+                length:
+                  type: integer
+                  description: Максимальная длина исходного слова
+                  minimum: 1
+                  maximum: 10
+                  example: 3
+      responses:
+        '200':
+          description: Задача успешно создана
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                    format: uuid
+                    description: Уникальный идентификатор задачи
+                    example: "550e8400-e29b-41d4-a716-446655440000"
+        '400':
+          description: Ошибка в запросе
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Внутренняя ошибка сервера
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/hash/status:
+    get:
+      tags:
+        - External API
+      summary: Получить статус задачи
+      description: |
+        Возвращает текущий статус выполнения задачи.
+        Доступен после завершения или во время выполнения.
+      operationId: getTaskStatus
+      parameters:
+        - name: requestId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: ID задачи
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        '200':
+          description: Статус задачи
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/TaskStatusInProgress'
+                  - $ref: '#/components/schemas/TaskStatusCompleted'
+                  - $ref: '#/components/schemas/TaskStatusError'
+        '400':
+          description: Отсутствует requestId
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Задача не найдена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ========== ВНУТРЕННЕЕ API (доступно только воркерам) ==========
+  /manager/status:
+    post:
+      tags:
+        - Internal API
+      summary: Получить статус от воркера
+      description: |
+        Воркеры отправляют свой прогресс через этот эндпоинт.
+        Используется для мониторинга и восстановления после сбоев.
+      operationId: receiveWorkerStatus
+      x-internal: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkerStatusUpdate'
+      responses:
+        '200':
+          description: Статус принят
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [received]
+                    example: "received"
+        '400':
+          description: Неверные данные
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Ошибка обработки
+
+# ========== API ВОРКЕРОВ (доступно только менеджеру) ==========
+  /internal/api/worker/hash/crack/task:
+    post:
+      tags:
+        - Internal API
+      summary: Отправить задачу воркеру
+      description: |
+        Менеджер отправляет часть диапазона для перебора конкретному воркеру.
+        **Внутренний эндпоинт воркера, доступен только менеджеру.**
+      operationId: assignWorkerTask
+      x-internal: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkerTaskAssignment'
+      responses:
+        '200':
+          description: Задача успешно обработана
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkerTaskResult'
+        '400':
+          description: Неверные данные
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Ошибка при выполнении
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkerTaskResult'
+
+  /status:
+    get:
+      tags:
+        - Internal API
+      summary: Проверка здоровья воркера
+      description: Эндпоинт для проверки доступности воркера
+      operationId: workerHealthCheck
+      x-internal: true
+      responses:
+        '200':
+          description: Воркер работает
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkerHealth'
+
+  /:
+    get:
+      tags:
+        - Internal API
+      summary: Информация о воркере
+      description: Базовая информация о воркере
+      operationId: workerInfo
+      x-internal: true
+      responses:
+        '200':
+          description: Информация о воркере
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "worker running"
+                  worker:
+                    type: string
+                    example: "worker_1"
+                  alphabet_length:
+                    type: integer
+                    example: 36
+                  endpoints:
+                    type: array
+                    items:
+                      type: string
+                    example: ["/process", "/status"]
+
+components:
+  schemas:
+    # Основные схемы
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Описание ошибки
+          example: "word is required"
+    
+    # Статусы задачи
+    TaskStatusInProgress:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [IN_PROGRESS]
+          example: "IN_PROGRESS"
+        progress:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          description: Средний прогресс по всем воркерам
+          example: 45.67
+        data:
+          type: array
+          items:
+            type: string
+          description: Найденные на данный момент слова
+          example: ["abc", "def"]
+    
+    TaskStatusCompleted:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [COMPLETED]
+          example: "COMPLETED"
+        progress:
+          type: integer
+          enum: [100]
+          example: 100
+        data:
+          type: array
+          items:
+            type: string
+          description: Все найденные слова
+          example: ["abc", "def", "ghi"]
+    
+    TaskStatusError:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ERROR]
+          example: "ERROR"
+        progress:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          example: 75.5
+        data:
+          type: array
+          items:
+            type: string
+          description: Найденные до ошибки слова
+          example: ["abc", "def"]
+    
+    # Статус воркера
+    WorkerStatusUpdate:
+      type: object
+      required:
+        - task_id
+        - worker_id
+        - status
+        - timestamp
+      properties:
+        task_id:
+          type: string
+          format: uuid
+          description: ID задачи
+        worker_id:
+          type: string
+          description: ID воркера
+          example: "worker_1"
+        status:
+          type: string
+          enum: [IN_PROGRESS, FOUND, COMPLETED, ERROR]
+          description: Текущий статус воркера
+        timestamp:
+          type: number
+          description: Временная метка
+        percentage:
+          type: number
+          format: float
+          description: Процент выполнения (для IN_PROGRESS)
+        current_index:
+          type: integer
+          description: Текущий обработанный индекс
+        last_index:
+          type: integer
+          description: Последний обработанный индекс
+        found_words:
+          type: array
+          items:
+            type: string
+          description: Найденные слова
+        range_start:
+          type: integer
+          description: Начало диапазона
+        range_end:
+          type: integer
+          description: Конец диапазона
+        word:
+          type: string
+          description: Найденное слово (для FOUND)
+        index:
+          type: integer
+          description: Индекс найденного слова
+        error:
+          type: string
+          description: Описание ошибки (для ERROR)
+    
+    WorkerDetailedStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [PENDING, IN_PROGRESS, COMPLETED, ERROR]
+        range:
+          type: string
+          example: "[0, 1000)"
+        progress:
+          type: number
+          format: float
+          example: 45.67
+        timestamp:
+          type: number
+        last_index:
+          type: integer
+        found_words:
+          type: array
+          items:
+            type: string
+    
+    TaskProgress:
+      type: object
+      properties:
+        task_id:
+          type: string
+        overall_progress:
+          type: number
+          format: float
+          example: 67.89
+        total_words_found:
+          type: integer
+          example: 3
+        found_words:
+          type: array
+          items:
+            type: string
+          example: ["abc", "def"]
+        workers_status:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/WorkerDetailedStatus'
+    
+    # Задание для воркера
+    WorkerTaskAssignment:
+      type: object
+      required:
+        - word
+        - idx_start
+        - idx_end
+        - task_id
+        - worker_id
+      properties:
+        word:
+          type: string
+          description: MD5 хеш для взлома
+        idx_start:
+          type: integer
+          description: Начальный индекс для перебора (включительно)
+          example: 0
+        idx_end:
+          type: integer
+          description: Конечный индекс для перебора (исключительно)
+          example: 1000
+        task_id:
+          type: string
+          format: uuid
+          description: ID задачи
+        worker_id:
+          type: string
+          description: ID воркера
+        last_processed_index:
+          type: integer
+          description: Индекс, с которого нужно продолжить (для восстановления)
+        found_words:
+          type: array
+          items:
+            type: string
+          description: Уже найденные слова (для восстановления)
+    
+    WorkerTaskResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
+          example: "ok"
+        worker:
+          type: string
+          description: Имя хоста воркера
+          example: "worker_1"
+        worker_id:
+          type: string
+          description: ID воркера
+        task_id:
+          type: string
+        received_word:
+          type: array
+          items:
+            type: string
+          description: Найденные слова
+        range_processed:
+          type: string
+          description: Обработанный диапазон
+          example: "[0, 1000)"
+        last_processed_index:
+          type: integer
+        total_checked:
+          type: integer
+        error:
+          type: string
+          description: Описание ошибки (при status=error)
+    
+    WorkerHealth:
+      type: object
+      properties:
+        worker_id:
+          type: string
+          example: "worker_1"
+        status:
+          type: string
+          enum: [alive]
+          example: "alive"
+        alphabet:
+          type: string
+          description: Первые символы алфавита
+          example: "abcde..."
+        alphabet_length:
+          type: integer
+          example: 36
+        uptime:
+          type: number
+          description: Время работы в секундах
+          example: 3600.5
+
+x-tagGroups:
+  - name: External API
+    tags:
+      - External API
+  - name: Internal API
+    tags:
+      - Internal API
