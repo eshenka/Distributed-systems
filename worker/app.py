@@ -151,10 +151,10 @@ def process():
             local_task_id, 
             "COMPLETED", 
             {
-                "words_count": len(ret_words), # count 
+                "words_count": len(ret_words), 
                 "found_words": ret_words,
-                "last_index": current_index, # delete
-                "final_range": f"[{idx_start}, {idx_end})", # delete
+                "last_index": current_index,
+                "final_range": f"[{idx_start}, {idx_end})",
                 "progress": 100
             }
         )

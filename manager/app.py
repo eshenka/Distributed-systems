@@ -186,37 +186,37 @@ class TaskManager:
             except Exception as e:
                 logger.exception(f"Monitor crashed iteration: {e}")
     
-    async def _redistribute_worker_task(self, failed_worker: WorkerTask, task_id: str):
+    async def _redistribute_worker_task(self, failed_task: WorkerTask, task_id: str):
         with self.dead_lock:
-            self.dead_workers.add(failed_worker.worker_url)
+            self.dead_workers.add(failed_task.worker_url)
 
         available_workers = [
             w for w in WORKERS
-            if w not in self.dead_workers and w != failed_worker.worker_url
+            if w not in self.dead_workers and w != failed_task.worker_url
         ]
         
         if not available_workers:
             logger.warning(f"No available workers to redistribute task {task_id}")
-            failed_worker.status = "ERROR"
+            failed_task.status = "ERROR"
             return
         
         target_worker = random.choice(available_workers)
         
-        last_processed = failed_worker.last_processed_index or failed_worker.idx_start
-        remaining_range = [last_processed, failed_worker.idx_end]
+        last_processed = failed_task.last_processed_index or failed_task.idx_start
+        remaining_range = [last_processed, failed_task.idx_end]
         
         if remaining_range[0] >= remaining_range[1]:
             return
         
         logger.info(f"Redistributing range [{remaining_range[0]}, {remaining_range[1]}) "
-                   f"from {failed_worker.local_task_id}")
+                   f"from {failed_task.local_task_id}")
         
         new_worker_task = WorkerTask(
             worker_url=target_worker,
-            local_task_id=f"{failed_worker.local_task_id}_redistributed",
+            local_task_id=f"{failed_task.local_task_id}_redistributed",
             idx_start=remaining_range[0],
             idx_end=remaining_range[1],
-            word=failed_worker.word,
+            word=failed_task.word,
             task_id=task_id
         )
         
@@ -224,7 +224,7 @@ class TaskManager:
         
         asyncio.create_task(self._execute_worker_task(new_worker_task))
         
-        failed_worker.status = "ERROR"
+        failed_task.status = "ERROR"
     
     async def _execute_worker_task(self, worker_task: WorkerTask):
         worker_task.status = "IN_PROGRESS"
@@ -329,17 +329,26 @@ class TaskManager:
     def create_task(self, word: str, length: int) -> str:
         task_id = str(uuid.uuid4())
         
+        with self.dead_lock:
+            alive_workers = [w for w in WORKERS if w not in self.dead_workers]
+        
+        if not alive_workers:
+            logger.error("No alive workers available to create task")
+            with status_lock:
+                task_statuses[task_id] = {"_final": {"status": "ERROR", "found_words": [], "progress": 0}}
+            return task_id
+
         total_combinations = sum(len(ALPHABET) ** i for i in range(1, length + 1))
-        chunk_size = total_combinations // len(WORKERS)
+        chunk_size = total_combinations // len(alive_workers)
         
         workers = []
         
         with status_lock:
             task_statuses[task_id] = {}
         
-        for i, worker_url in enumerate(WORKERS):
+        for i, worker_url in enumerate(alive_workers):
             idx_start = i * chunk_size
-            if i == len(WORKERS) - 1:
+            if i == len(alive_workers) - 1:
                 idx_end = total_combinations
             else:
                 idx_end = (i + 1) * chunk_size
